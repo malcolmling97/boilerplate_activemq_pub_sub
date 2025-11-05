@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  pub:
+    build: ./pub
+    env_file: ./pub/.env
+    ports:
+      - "5000:5000"
+    working_dir: /app
+    command: python app.py
+  sub:
+    build: ./sub
+    env_file: ./sub/.env
+    working_dir: /app
+    command: python consumer.py
