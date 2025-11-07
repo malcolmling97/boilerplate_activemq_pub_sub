@@ -1,14 +1,55 @@
 version: "3.9"
 services:
-  pub:
+  pub1:
     build: ./pub
     env_file: ./pub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue1
     ports:
-      - "5000:5000"
+      - "5001:5000"
     working_dir: /app
     command: python app.py
-  sub:
+  
+  pub2:
+    build: ./pub
+    env_file: ./pub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue2
+    ports:
+      - "5002:5000"
+    working_dir: /app
+    command: python app.py
+  
+  pub3:
+    build: ./pub
+    env_file: ./pub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue3
+    ports:
+      - "5003:5000"
+    working_dir: /app
+    command: python app.py
+  
+  sub1:
     build: ./sub
     env_file: ./sub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue1
+    working_dir: /app
+    command: python consumer.py
+  
+  sub2:
+    build: ./sub
+    env_file: ./sub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue2
+    working_dir: /app
+    command: python consumer.py
+  
+  sub3:
+    build: ./sub
+    env_file: ./sub/.env
+    environment:
+      ACTIVEMQ_QUEUE: /queue/queue3
     working_dir: /app
     command: python consumer.py
