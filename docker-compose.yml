@@ -35,6 +35,7 @@ services:
     env_file: ./sub/.env
     environment:
       ACTIVEMQ_QUEUE: /queue/queue1
+      PYTHONUNBUFFERED: 1
     working_dir: /app
     command: python consumer.py
   
@@ -43,6 +44,7 @@ services:
     env_file: ./sub/.env
     environment:
       ACTIVEMQ_QUEUE: /queue/queue2
+      PYTHONUNBUFFERED: 1
     working_dir: /app
     command: python consumer.py
   
@@ -51,5 +53,6 @@ services:
     env_file: ./sub/.env
     environment:
       ACTIVEMQ_QUEUE: /queue/queue3
+      PYTHONUNBUFFERED: 1
     working_dir: /app
     command: python consumer.py
