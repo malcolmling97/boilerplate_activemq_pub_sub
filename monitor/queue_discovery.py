@@ -24,6 +24,7 @@ class StatisticsListener(stomp.ConnectionListener):
         self.topics = {}
         self.connected = False
         self.response_received = False
+        self.any_response_received = False
         self.raw_response = None
 
     def on_error(self, frame):
@@ -50,61 +51,48 @@ class StatisticsListener(stomp.ConnectionListener):
         """
         print("[INFO] Received statistics response")
         self.response_received = True
+        self.any_response_received = True
         self.raw_response = frame
 
         try:
-            headers = frame.headers
-
-            print(f"\n[DEBUG] All message headers:")
-            for key, value in sorted(headers.items()):
-                print(f"  {key}: {value}")
-
-            print(f"\n[DEBUG] Message body (RAW XML):")
-            print("=" * 80)
-            if frame.body:
-                print(frame.body)
-            else:
-                print("(empty)")
-            print("=" * 80)
-
             # AWS MQ returns MapMessage as XML when transformation: jms-map-xml
             if frame.body and '<map>' in frame.body:
                 # Parse XML to extract statistics
                 import xml.etree.ElementTree as ET
                 root = ET.fromstring(frame.body)
 
-                # Extract all map entries
+                # Extract all map entries into a dict
+                stats = {}
+                destination_name = None
+
+                # Each entry has: <string>key</string><type>value</type>
+                # where type can be: string, long, int, double, etc.
                 for entry in root.findall('.//entry'):
-                    key = entry.find('string')
-                    value_elem = entry.find('./*[2]')  # Second child is the value
+                    children = list(entry)
+                    if len(children) >= 2:
+                        key_elem = children[0]
+                        value_elem = children[1]
 
-                    if key is not None and value_elem is not None:
-                        key_name = key.text
-                        value = value_elem.text
+                        if key_elem.tag == 'string' and key_elem.text:
+                            key_name = key_elem.text
+                            value = value_elem.text if value_elem.text is not None else ''
+                            stats[key_name] = value
 
-                        print(f"[STAT] {key_name}: {value}")
+                            # Extract destination name
+                            if key_name == 'destinationName':
+                                destination_name = value
 
-                        # Parse destination-specific stats
-                        # Keys like: queue.queue1.size, queue.queue1.enqueueCount, etc.
-                        if key_name.startswith('queue.'):
-                            parts = key_name.split('.', 2)
-                            if len(parts) >= 3:
-                                queue_name = parts[1]
-                                metric = parts[2]
-
-                                if queue_name not in self.queues:
-                                    self.queues[queue_name] = {}
-                                self.queues[queue_name][metric] = value
-
-                        elif key_name.startswith('topic.'):
-                            parts = key_name.split('.', 2)
-                            if len(parts) >= 3:
-                                topic_name = parts[1]
-                                metric = parts[2]
-
-                                if topic_name not in self.topics:
-                                    self.topics[topic_name] = {}
-                                self.topics[topic_name][metric] = value
+                # If this response has a destinationName, it's a specific queue/topic
+                if destination_name:
+                    # Parse destination name: "queue://queue1" or "topic://topicName"
+                    if destination_name.startswith('queue://'):
+                        queue_name = destination_name.replace('queue://', '')
+                        self.queues[queue_name] = stats
+                        print(f"  -> Found queue: {queue_name} with {len(stats)} metrics")
+                    elif destination_name.startswith('topic://'):
+                        topic_name = destination_name.replace('topic://', '')
+                        self.topics[topic_name] = stats
+                        print(f"  -> Found topic: {topic_name} with {len(stats)} metrics")
 
         except Exception as e:
             print(f"[WARN] Error processing statistics response: {e}")
@@ -183,29 +171,39 @@ def discover_destinations():
                 print("    - Statistics destination doesn't exist/isn't accessible")
                 continue  # Try next destination instead of failing
 
-            print("[INFO] Waiting for response...")
+            print("[INFO] Waiting for responses (may receive multiple)...")
 
-            # Wait for response (should be quick, usually under 1 second)
-            timeout = 10
+            # Wait for all responses - since wildcard returns one message per destination
+            # We'll wait longer and check for a pause in messages
+            timeout = 15
+            last_response_time = time.time()
+
             for i in range(timeout, 0, -1):
                 if listener.response_received:
-                    print(f"\n[INFO] Response received!")
-                    break
-                print(f"[INFO] Waiting for response... {i} seconds remaining", end='\r')
+                    # Reset timer when we receive a message
+                    last_response_time = time.time()
+                    listener.response_received = False  # Reset to detect next message
+
+                # If no response for 3 seconds after last one, we're probably done
+                if listener.queues or listener.topics:
+                    time_since_last = time.time() - last_response_time
+                    if time_since_last > 3:
+                        print(f"\n[INFO] No more responses for 3 seconds, assuming complete")
+                        break
+
+                print(f"[INFO] Waiting... {i}s remaining (Queues: {len(listener.queues)}, Topics: {len(listener.topics)})", end='\r')
                 time.sleep(1)
 
             print("\n")
 
             # If we got a response with queue/topic data, stop trying other destinations
             if listener.queues or listener.topics:
-                print(f"[SUCCESS] Found destination statistics with: {statistics_destination}")
+                print(f"[SUCCESS] Found {len(listener.queues)} queues and {len(listener.topics)} topics using: {statistics_destination}")
                 break
-            elif listener.response_received:
-                print(f"[INFO] Response received but no queue/topic stats found. Trying next destination...")
             else:
-                print(f"[WARN] No response received. Trying next destination...")
+                print(f"[WARN] No destination statistics found. Trying next destination...")
 
-        if not listener.response_received:
+        if not listener.any_response_received:
             print("[WARN] No response received within timeout period")
             print("\nTroubleshooting:")
             print("  1. Verify StatisticsBrokerPlugin is enabled in broker configuration")
@@ -225,33 +223,79 @@ def discover_destinations():
 
 def print_results(listener):
     """Print discovered queues and topics in a formatted way"""
-    print("=" * 80)
-    print("DISCOVERY RESULTS")
+    print("\n" + "=" * 80)
+    print("QUEUE & TOPIC STATISTICS")
     print("=" * 80)
 
     if listener.queues:
-        print(f"\n📋 QUEUES ({len(listener.queues)} found):\n")
+        print(f"\n📋 QUEUES ({len(listener.queues)} found):")
+        print("=" * 80)
 
         for queue_name, stats in sorted(listener.queues.items()):
             # Filter out advisory queues for cleaner output
             if not queue_name.startswith('ActiveMQ.'):
-                print(f"\nQueue: {queue_name}")
-                print("-" * 40)
-                for key, value in sorted(stats.items()):
-                    print(f"  {key}: {value}")
+                print(f"\n🔹 Queue: {queue_name}")
+                print("-" * 80)
+
+                # Show key metrics
+                key_metrics = [
+                    ('size', 'Queue Size (Pending)'),
+                    ('enqueueCount', 'Total Enqueued'),
+                    ('dequeueCount', 'Total Dequeued'),
+                    ('consumerCount', 'Active Consumers'),
+                    ('producerCount', 'Active Producers'),
+                ]
+
+                # Print key metrics
+                found_any = False
+                for key, label in key_metrics:
+                    if key in stats:
+                        print(f"  {label:.<35} {stats[key]}")
+                        found_any = True
+
+                if not found_any:
+                    # No standard metrics found, print all stats
+                    print(f"  [Available metrics: {', '.join(stats.keys())}]")
+                    for key, value in sorted(stats.items()):
+                        if key not in ['brokerId', 'brokerName', 'destinationName']:
+                            print(f"  {key}: {value}")
     else:
         print("\n[INFO] No queues discovered.")
 
     if listener.topics:
-        print(f"\n📡 TOPICS ({len(listener.topics)} found):\n")
+        print(f"\n\n📡 TOPICS ({len(listener.topics)} found):")
+        print("=" * 80)
 
         for topic_name, stats in sorted(listener.topics.items()):
             # Filter out advisory topics for cleaner output
             if not topic_name.startswith('ActiveMQ.'):
-                print(f"\nTopic: {topic_name}")
-                print("-" * 40)
-                for key, value in sorted(stats.items()):
-                    print(f"  {key}: {value}")
+                print(f"\n🔹 Topic: {topic_name}")
+                print("-" * 80)
+
+                # Show key metrics first
+                key_metrics = [
+                    ('enqueueCount', 'Total Enqueued'),
+                    ('dequeueCount', 'Total Dequeued'),
+                    ('consumerCount', 'Active Consumers'),
+                    ('producerCount', 'Active Producers'),
+                    ('dispatchCount', 'Dispatched'),
+                    ('averageEnqueueTime', 'Avg Enqueue Time (ms)'),
+                    ('averageMessageSize', 'Avg Message Size (bytes)'),
+                ]
+
+                # Print key metrics
+                for key, label in key_metrics:
+                    if key in stats:
+                        print(f"  {label:.<40} {stats[key]}")
+
+                # Print any additional metrics not in key_metrics
+                printed_keys = {k for k, _ in key_metrics}
+                other_stats = {k: v for k, v in stats.items() if k not in printed_keys and k not in ['destinationName', 'brokerId', 'brokerName']}
+
+                if other_stats:
+                    print(f"\n  Other Metrics:")
+                    for key, value in sorted(other_stats.items()):
+                        print(f"    {key}: {value}")
     else:
         print("\n[INFO] No topics discovered.")
 
