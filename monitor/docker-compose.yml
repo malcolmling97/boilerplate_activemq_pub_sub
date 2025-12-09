@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  monitor:
+    build: .
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: 1
+    working_dir: /app
+    # command: python queue_discovery.py
+    command: python queue_discovery.py
